@@ -36,26 +36,37 @@ jobs:
           ndk-version: r26b
           local-cache: true
 
-      - name: Clone Media3 Source
+      - name: Prepare Source
         run: |
           git clone --branch ${{ github.event.inputs.media3_version }} https://github.com/androidx/media.git "$MEDIA3_PATH"
-
-      - name: Setup FFmpeg Source
-        run: |
           cd "$FFMPEG_JNI_PATH"
           git clone git://source.ffmpeg.org/ffmpeg ffmpeg
-          cd ffmpeg
-          git checkout ${{ github.event.inputs.ffmpeg_version }}
+          cd ffmpeg && git checkout ${{ github.event.inputs.ffmpeg_version }}
 
-      - name: Inject MP2 Support
+      - name: Build FFmpeg (Inject MP2 & Compile)
         run: |
           cd "$FFMPEG_JNI_PATH"
+          # 1. 注入补丁
           sed -i '/--enable-decoder=mp3/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
-
-      - name: Run Build
-        run: |
-          cd "$FFMPEG_JNI_PATH"
-          # 注意：请确保你的 build_ffmpeg_arm_only.sh 已正确创建并赋权
+          
+          # 2. 创建并执行编译脚本 (整合逻辑以避免文件寻址错误)
+          cat > build_ffmpeg_arm_only.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          FFMPEG_DIR=$1
+          NDK_PATH=$2
+          export ANDROID_NDK=$NDK_PATH
+          export PATH=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          
+          # 编译逻辑开始
+          cd "$FFMPEG_DIR"
+          ./configure --target-os=android --enable-cross-compile --enable-static --disable-shared \
+                      --disable-everything --enable-avcodec --enable-avformat --enable-avutil \
+                      --enable-swresample --enable-decoder=h264,hevc,aac,mp3,mp2,mp2float \
+                      --arch=arm64 --cc=aarch64-linux-android21-clang
+          make -j$(nproc)
+          EOF
+          
           chmod +x build_ffmpeg_arm_only.sh
           ./build_ffmpeg_arm_only.sh "$(pwd)/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}"
 
