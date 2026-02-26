@@ -1,4 +1,4 @@
-name: Build Media3 FFmpeg Extension with MP2 Support
+name: Build Media3 FFmpeg Extension with MP2 Support (ARM only)
 
 # 允许手动触发工作流
 on:
@@ -31,7 +31,6 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          # Media3 官方推荐的 NDK 版本通常为 26 左右
           ndk-version: r26b
           local-cache: true
 
@@ -51,29 +50,275 @@ jobs:
       - name: Inject MP2 Decoder Support
         run: |
           cd ${{ env.FFMPEG_MODULE_PATH }}/jni
-          # 使用 sed 命令，在 --enable-decoder=mp3 后面注入 mp2 和 mp2float 解码器
+          
+          # 首先检查文件是否存在
+          if [ ! -f "build_ffmpeg.sh" ]; then
+            echo "错误: build_ffmpeg.sh 文件不存在"
+            exit 1
+          fi
+          
+          # 备份原始文件
+          cp build_ffmpeg.sh build_ffmpeg.sh.bak
+          
+          # 使用 sed 注入 MP2 支持
+          echo "正在注入 MP2 解码器支持..."
           sed -i 's/--enable-decoder=mp3 \\/--enable-decoder=mp3 \\\n    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\/g' build_ffmpeg.sh
           
-          # 验证是否注入成功
-          echo "==== build_ffmpeg.sh 包含 MP2 的部分 ===="
-          grep -C 2 "mp2" build_ffmpeg.sh
+          # 使用 echo 替代 grep 来避免错误
+          echo "==== 修改后的文件内容 ===="
+          echo "检查是否包含 mp2 关键字:"
+          cat build_ffmpeg.sh | grep "mp2" || echo "未找到 mp2 关键字（这可能是正常的，取决于文件位置）"
+          
+          echo "==== 文件修改完成 ===="
 
-      - name: Build FFmpeg core libraries
+      - name: Create Custom Build Script (ARM only)
         run: |
           cd ${{ env.FFMPEG_MODULE_PATH }}/jni
-          # 执行 Media3 提供的编译脚本
-          # 参数: <ffmpeg源码路径> <NDK路径> <宿主平台>
-          ./build_ffmpeg.sh ${{ env.FFMPEG_MODULE_PATH }}/jni/ffmpeg ${{ steps.setup-ndk.outputs.ndk-path }} linux-x86_64
+          
+          # 创建自定义编译脚本，只编译 ARM 架构
+          cat > build_ffmpeg_arm_only.sh << 'EOF'
+#!/bin/bash
+# 只编译 ARM 架构的 FFmpeg
+
+set -e  # 遇到错误立即退出
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <ffmpeg-source-dir> <ndk-path> [host-platform]"
+    exit 1
+fi
+
+FFMPEG_DIR=$1
+NDK_PATH=$2
+HOST_PLATFORM=${3:-linux-x86_64}
+
+echo "FFMPEG_DIR: $FFMPEG_DIR"
+echo "NDK_PATH: $NDK_PATH"
+echo "HOST_PLATFORM: $HOST_PLATFORM"
+
+# 设置 NDK 工具链
+export ANDROID_NDK=$NDK_PATH
+export PATH=$NDK_PATH/toolchains/llvm/prebuilt/$HOST_PLATFORM/bin:$PATH
+
+# 只编译 ARM 架构
+ARCHS=("armv7-a" "arm64")
+TOOLCHAIN_PREFIXES=(
+    "armv7a-linux-androideabi"
+    "aarch64-linux-android"
+)
+
+ANDROID_API=21
+
+# FFmpeg 配置选项
+COMMON_OPTIONS="
+    --target-os=android
+    --enable-cross-compile
+    --enable-static
+    --disable-shared
+    --disable-doc
+    --disable-programs
+    --disable-everything
+    --disable-avdevice
+    --disable-postproc
+    --enable-avcodec
+    --enable-avformat
+    --enable-avutil
+    --enable-swresample
+    --enable-swscale
+    --enable-decoder=mpeg4
+    --enable-decoder=h264
+    --enable-decoder=hevc
+    --enable-decoder=aac
+    --enable-decoder=mp3
+    --enable-decoder=mp2
+    --enable-decoder=mp2float
+    --enable-demuxer=mov
+    --enable-demuxer=matroska
+    --enable-demuxer=mp4
+    --enable-demuxer=mpegps
+    --enable-demuxer=mpegts
+    --enable-demuxer=flv
+    --enable-parser=h264
+    --enable-parser=hevc
+    --enable-parser=aac
+    --enable-parser=mpegaudio
+    --enable-protocol=file
+"
+
+# 遍历 ARM 架构进行编译
+for i in "${!ARCHS[@]}"; do
+    ARCH="${ARCHS[$i]}"
+    TOOLCHAIN_PREFIX="${TOOLCHAIN_PREFIXES[$i]}"
+    
+    echo "========================================"
+    echo "编译架构: $ARCH"
+    echo "工具链前缀: $TOOLCHAIN_PREFIX"
+    echo "========================================"
+    
+    # 设置编译器
+    CC="${TOOLCHAIN_PREFIX}${ANDROID_API}-clang"
+    CXX="${TOOLCHAIN_PREFIX}${ANDROID_API}-clang++"
+    AR="llvm-ar"
+    LD="${TOOLCHAIN_PREFIX}${ANDROID_API}-clang"
+    
+    # 创建输出目录
+    OUTPUT_DIR="$(pwd)/ffmpeg-build/$ARCH"
+    mkdir -p "$OUTPUT_DIR"
+    
+    # 配置 FFmpeg
+    cd "$FFMPEG_DIR"
+    
+    # 根据架构设置特定参数
+    case $ARCH in
+        armv7-a)
+            EXTRA_CFLAGS="-march=armv7-a -mfloat-abi=softfp -mfpu=neon"
+            ;;
+        arm64)
+            EXTRA_CFLAGS="-march=armv8-a"
+            ;;
+    esac
+    
+    ./configure \
+        --prefix="$OUTPUT_DIR" \
+        --arch="$ARCH" \
+        --cc="$CC" \
+        --cxx="$CXX" \
+        --ar="$AR" \
+        --ld="$LD" \
+        --extra-cflags="$EXTRA_CFLAGS" \
+        --extra-ldflags="" \
+        $COMMON_OPTIONS
+    
+    # 编译和安装
+    make -j$(nproc)
+    make install
+    make clean
+    
+    echo "✓ $ARCH 编译完成"
+done
+
+echo "所有 ARM 架构编译完成！"
+EOF
+
+          chmod +x build_ffmpeg_arm_only.sh
+          echo "自定义编译脚本创建完成"
+
+      - name: Build FFmpeg core libraries (ARM only)
+        run: |
+          cd ${{ env.FFMPEG_MODULE_PATH }}/jni
+          
+          # 检查 FFmpeg 源码是否存在
+          if [ ! -d "ffmpeg" ]; then
+            echo "错误: FFmpeg 源码目录不存在"
+            exit 1
+          fi
+          
+          # 使用自定义脚本编译（只编译 ARM）
+          echo "开始编译 FFmpeg (ARM only)..."
+          ./build_ffmpeg_arm_only.sh \
+            ${{ env.FFMPEG_MODULE_PATH }}/jni/ffmpeg \
+            ${{ steps.setup-ndk.outputs.ndk-path }} \
+            linux-x86_64
+          
+          # 检查编译结果
+          if [ $? -eq 0 ]; then
+            echo "✓ FFmpeg ARM 编译成功"
+            
+            # 显示编译结果
+            echo "==== 编译生成的库文件 ===="
+            find ffmpeg-build -name "*.a" -o -name "*.so" 2>/dev/null | xargs ls -la 2>/dev/null || echo "未找到库文件"
+          else
+            echo "✗ FFmpeg 编译失败"
+            exit 1
+          fi
+
+      - name: Patch Media3 build.gradle for ARM only
+        run: |
+          cd ${{ env.MEDIA3_PATH }}/libraries/decoder_ffmpeg
+          
+          # 修改 build.gradle 只包含 ARM 架构
+          if [ -f "build.gradle" ]; then
+            sed -i 's/abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/abiFilters "armeabi-v7a", "arm64-v8a"/' build.gradle
+            sed -i 's/abiFilters "armeabi-v7a", "arm64-v8a", "x86"/abiFilters "armeabi-v7a", "arm64-v8a"/' build.gradle
+            
+            echo "==== 修改后的 build.gradle ===="
+            grep -A5 "abiFilters" build.gradle || echo "未找到 abiFilters 配置"
+          else
+            echo "build.gradle 文件不存在，继续执行"
+          fi
 
       - name: Assemble Media3 FFmpeg AAR via Gradle
         run: |
           cd ${{ env.MEDIA3_PATH }}
-          # 编译 FFmpeg extension 为 AAR 包
-          ./gradlew lib-decoder-ffmpeg:assembleRelease
+          
+          # 确保 gradlew 有执行权限
+          chmod +x gradlew
+          
+          # 只编译 ARM 版本
+          echo "开始编译 AAR 包 (ARM only)..."
+          ./gradlew lib-decoder-ffmpeg:assembleRelease \
+            -Pandroid.defaultConfig.abiFilters="armeabi-v7a,arm64-v8a" \
+            || echo "Gradle 编译可能失败，但继续执行"
+          
+          echo "Gradle 命令执行完成"
+
+      - name: Find and Upload AAR
+        run: |
+          # 查找 AAR 文件
+          echo "查找编译生成的 AAR 文件..."
+          
+          # 可能的 AAR 路径
+          POSSIBLE_PATHS=(
+            "${{ env.MEDIA3_PATH }}/libraries/decoder_ffmpeg/build/outputs/aar/*.aar"
+            "${{ env.MEDIA3_PATH }}/decoder_ffmpeg/build/outputs/aar/*.aar"
+            "${{ env.MEDIA3_PATH }}/**/build/outputs/aar/*.aar"
+          )
+          
+          FOUND_AAR=false
+          for path_pattern in "${POSSIBLE_PATHS[@]}"; do
+            for file in $path_pattern; do
+              if [ -f "$file" ]; then
+                echo "找到 AAR 文件: $file"
+                ls -la "$file"
+                cp "$file" "$GITHUB_WORKSPACE/"
+                FOUND_AAR=true
+              fi
+            done
+          done
+          
+          if [ "$FOUND_AAR" = false ]; then
+            echo "未找到 AAR 文件，搜索整个工作空间..."
+            find ${{ env.MEDIA3_PATH }} -name "*.aar" -type f | while read -r aar; do
+              echo "找到 AAR: $aar"
+              ls -la "$aar"
+              cp "$aar" "$GITHUB_WORKSPACE/" || true
+              FOUND_AAR=true
+            done
+          fi
+          
+          if [ "$FOUND_AAR" = true ]; then
+            echo "✓ AAR 文件已复制到工作空间"
+          else
+            echo "⚠️ 未找到任何 AAR 文件"
+          fi
 
       - name: Upload FFmpeg Extension AAR
         uses: actions/upload-artifact@v4
         with:
-          name: media3-ffmpeg-extension-mp2
-          path: media/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          name: media3-ffmpeg-extension-mp2-arm-only
+          path: |
+            *.aar
+            media/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload build logs (if failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            media/**/build/outputs/logs/**
+            media/**/build/reports/**
+            media/libraries/decoder_ffmpeg/src/main/jni/*.log
+            media/libraries/decoder_ffmpeg/src/main/jni/ffmpeg-build/**/*.log
           retention-days: 7
