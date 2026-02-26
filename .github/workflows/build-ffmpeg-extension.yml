@@ -49,21 +49,40 @@ jobs:
           # 1. 注入补丁
           sed -i '/--enable-decoder=mp3/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
           
-          # 2. 创建并执行编译脚本 (整合逻辑以避免文件寻址错误)
+          # 2. 创建并执行编译脚本
           cat > build_ffmpeg_arm_only.sh << 'EOF'
           #!/bin/bash
           set -e
           FFMPEG_DIR=$1
           NDK_PATH=$2
-          export ANDROID_NDK=$NDK_PATH
-          export PATH=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           
-          # 编译逻辑开始
+          # 针对 Android NDK r26 的特定路径设置
+          export TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
+          
+          # 使用 clang 作为编译器并显式指定 target
+          export CC=$TOOLCHAIN/bin/aarch64-linux-android21-clang
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          
           cd "$FFMPEG_DIR"
-          ./configure --target-os=android --enable-cross-compile --enable-static --disable-shared \
-                      --disable-everything --enable-avcodec --enable-avformat --enable-avutil \
-                      --enable-swresample --enable-decoder=h264,hevc,aac,mp3,mp2,mp2float \
-                      --arch=arm64 --cc=aarch64-linux-android21-clang
+          
+          # 配置 FFmpeg
+          ./configure \
+            --target-os=android \
+            --arch=aarch64 \
+            --enable-cross-compile \
+            --sysroot=$TOOLCHAIN/sysroot \
+            --cc=$CC \
+            --ar=$AR \
+            --extra-cflags="-fPIC" \
+            --extra-ldflags="-pie" \
+            --enable-static \
+            --disable-shared \
+            --disable-everything \
+            --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
+            --enable-decoder=h264,hevc,aac,mp3,mp2,mp2float \
+            --disable-doc --disable-programs
+            
           make -j$(nproc)
           EOF
           
@@ -73,7 +92,6 @@ jobs:
       - name: Assemble AAR
         run: |
           cd "$MEDIA3_PATH"
-          chmod +x gradlew
           ./gradlew :libraries:decoder_ffmpeg:assembleRelease -Pandroid.defaultConfig.abiFilters="armeabi-v7a,arm64-v8a"
 
       - name: Upload AAR
