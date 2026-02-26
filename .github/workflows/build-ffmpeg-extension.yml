@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       media3_version:
-        description: 'Media3 Branch or Tag (e.g., main, 1.2.0)'
+        description: 'Media3 Branch or Tag (e.g., main, 1.2.1)'
         required: true
         default: 'main'
       ffmpeg_version:
-        description: 'FFmpeg Release Tag (e.g., release/6.0)'
+        description: 'FFmpeg Release Tag (e.g., n6.0)'
         required: true
-        default: 'release/6.0'
+        default: 'n6.0'
 
 jobs:
   build:
@@ -38,52 +38,70 @@ jobs:
 
       - name: Prepare Source
         run: |
-          git clone --branch ${{ github.event.inputs.media3_version }} https://github.com/androidx/media.git "$MEDIA3_PATH"
+          git clone --depth 1 --branch ${{ github.event.inputs.media3_version }} https://github.com/androidx/media.git "$MEDIA3_PATH"
           cd "$FFMPEG_JNI_PATH"
-          git clone git://source.ffmpeg.org/ffmpeg ffmpeg
-          cd ffmpeg && git checkout ${{ github.event.inputs.ffmpeg_version }}
+          git clone --depth 1 --branch ${{ github.event.inputs.ffmpeg_version }} https://github.com/FFmpeg/FFmpeg.git ffmpeg
 
-      - name: Build FFmpeg
+      - name: Build FFmpeg Core
         run: |
           cd "$FFMPEG_JNI_PATH"
+          
+          # 1. 注入 MP2 解码器支持到 Media3 的默认脚本中（防止 Gradle 构建时检查失败）
           sed -i '/--enable-decoder=mp3/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
+          
+          # 2. 创建高度兼容的 ARM 编译脚本
           cat > build_ffmpeg_arm_only.sh << 'EOF'
           #!/bin/bash
           set -e
           FFMPEG_DIR=$1
           NDK_PATH=$2
+          
+          # 定义工具链路径
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
+          
           cd "$FFMPEG_DIR"
           make distclean || true
+          
+          # 关键点：直接使用 clang 并显式指定 --target 绕过包装脚本错误
           ./configure \
             --target-os=android \
             --arch=aarch64 \
             --cpu=armv8-a \
             --enable-cross-compile \
-            --cc=aarch64-linux-android21-clang \
-            --cross-prefix=aarch64-linux-android- \
+            --cc=$TOOLCHAIN/bin/clang \
+            --extra-cflags="--target=aarch64-linux-android21 -Os -fPIC" \
+            --extra-ldflags="--target=aarch64-linux-android21" \
             --sysroot=$TOOLCHAIN/sysroot \
-            --extra-cflags="-Os -fPIC" \
+            --nm=llvm-nm \
+            --ar=llvm-ar \
+            --ranlib=llvm-ranlib \
+            --strip=llvm-strip \
             --enable-static \
             --disable-shared \
             --disable-everything \
             --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
             --enable-decoder=h264,hevc,aac,mp3,mp2,mp2float \
             --disable-doc --disable-programs || (cat ffbuild/config.log && exit 1)
+            
           make -j$(nproc)
+          make install
           EOF
+          
           chmod +x build_ffmpeg_arm_only.sh
           ./build_ffmpeg_arm_only.sh "$(pwd)/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}"
 
-      - name: Assemble AAR
+      - name: Assemble AAR via Gradle
         run: |
           cd "$MEDIA3_PATH"
           chmod +x gradlew
-          ./gradlew :libraries:decoder_ffmpeg:assembleRelease -Pandroid.defaultConfig.abiFilters="armeabi-v7a,arm64-v8a"
+          # 强制 Gradle 只生成 ARM 架构的 AAR，减少构建时间
+          ./gradlew :libraries:decoder_ffmpeg:assembleRelease \
+            -Pandroid.defaultConfig.abiFilters="armeabi-v7a,arm64-v8a" \
+            --stacktrace
 
-      - name: Upload AAR
+      - name: Upload Final AAR
         uses: actions/upload-artifact@v4
         with:
-          name: media3-ffmpeg-extension-arm
+          name: media3-ffmpeg-extension-mp2-arm
           path: ${{ env.MEDIA3_PATH }}/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
