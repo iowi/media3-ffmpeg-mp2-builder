@@ -1,16 +1,15 @@
 name: Media3 FFmpeg MP2 Builder
 
 on:
-  workflow_dispatch: # 支持手动点击运行
+  workflow_dispatch:
 
 jobs:
   build-extension:
     runs-on: ubuntu-latest
-    
-    # 设置环境变量方便引用
     env:
       NDK_VERSION: r26b
-      MEDIA3_VERSION: 1.3.1  # 你可以修改为你需要的版本号或 main
+      # 明确指定版本，避免 main 分支变动
+      MEDIA3_VERSION: 1.3.1  
       FFMPEG_VERSION: release/6.0
 
     steps:
@@ -36,39 +35,42 @@ jobs:
 
       - name: Clone Media3 & FFmpeg
         run: |
-          # 克隆 Media3
           git clone --depth 1 --branch ${{ env.MEDIA3_VERSION }} https://github.com/androidx/media.git
-          
-          # 定义路径变量
           JNI_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main/jni
           echo "JNI_PATH=$JNI_PATH" >> $GITHUB_ENV
           
-          # 克隆 FFmpeg 到指定目录
           cd $JNI_PATH
           git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
 
-      - name: Force Inject MP2 Support
+      - name: Force Inject MP2 Support (The Nuclear Option)
         run: |
           cd ${{ env.JNI_PATH }}
           
-          # 【核心修复】不使用匹配替换，直接在脚本最前面强行插入解码器配置
-          # 我们通过在 COMMON_OPTIONS 变量定义后追加参数来确保生效
-          sed -i '/COMMON_OPTIONS=(/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
+          # 检查文件
+          ls -l build_ffmpeg.sh
           
-          echo "==== 检查脚本是否修改成功 ===="
-          grep -C 3 "mp2" build_ffmpeg.sh
+          # 直接在脚本的第二行（shebang 之后）插入强制开启 MP2 的参数
+          # 这样无论后面的 COMMON_OPTIONS 怎么变，这几个参数都会被加入到编译中
+          sed -i '2i ENABLED_DECODERS+=(mp2 mp2float)' build_ffmpeg.sh
+          
+          # 如果脚本里没有使用 ENABLED_DECODERS 变量，我们用最保险的方法：
+          # 直接搜索并替换 --enable-decoder=mp3 为支持 mp2 的版本
+          # 使用更加模糊的匹配模式
+          sed -i 's/--enable-decoder=mp3/--enable-decoder=mp3 --enable-decoder=mp2 --enable-decoder=mp2float/g' build_ffmpeg.sh
+          
+          echo "==== 验证脚本内容 (显示前 50 行) ===="
+          head -n 50 build_ffmpeg.sh | grep "mp2" || echo "Warning: mp2 not found in head, checking full file..."
+          grep "mp2" build_ffmpeg.sh
 
       - name: Build FFmpeg Native Libraries
         run: |
           cd ${{ env.JNI_PATH }}
           chmod +x build_ffmpeg.sh
-          # 执行编译，针对所有主流架构
           ./build_ffmpeg.sh "${{ env.JNI_PATH }}/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}" "linux-x86_64"
 
       - name: Build AAR with Gradle
         run: |
           cd $GITHUB_WORKSPACE/media
-          # 这一步会将上一步生成的 .so 打包进 AAR
           ./gradlew lib-decoder-ffmpeg:assembleRelease
 
       - name: Upload Artifact
