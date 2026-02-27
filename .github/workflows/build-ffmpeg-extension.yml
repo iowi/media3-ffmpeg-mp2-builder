@@ -35,44 +35,45 @@ jobs:
       - name: Clone Media3 & FFmpeg
         run: |
           git clone --depth 1 --branch ${{ env.MEDIA3_VERSION }} https://github.com/androidx/media.git
-          JNI_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main/jni
-          echo "JNI_PATH=$JNI_PATH" >> $GITHUB_ENV
           
-          cd $JNI_PATH
+          # 根据 1.3.1 官方规范，模块路径指向 src/main
+          FFMPEG_MODULE_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main
+          echo "FFMPEG_MODULE_PATH=$FFMPEG_MODULE_PATH" >> $GITHUB_ENV
+          
+          # 克隆 FFmpeg 源码到 jni 目录
+          cd $FFMPEG_MODULE_PATH/jni
           git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
-
-      - name: Inject MP2 Support
-        run: |
-          cd ${{ env.JNI_PATH }}
-          # 针对 1.3.1 脚本的精准注入：在配置数组中添加 mp2 和 mp2float
-          # 我们在 --enable-decoder=mp3 后面直接追加
-          sed -i 's/--enable-decoder=mp3/--enable-decoder=mp3 --enable-decoder=mp2 --enable-decoder=mp2float/g' build_ffmpeg.sh
-          
-          echo "==== 检查脚本修改结果 ===="
-          grep "mp2" build_ffmpeg.sh || (echo "注入失败！" && exit 1)
 
       - name: Build FFmpeg Native Libraries (arm64 & v7a)
         run: |
-          cd ${{ env.JNI_PATH }}
+          cd ${{ env.FFMPEG_MODULE_PATH }}/jni
           chmod +x build_ffmpeg.sh
           
-          # 只编译你需要的两个架构
-          ARCHS=("armeabi-v7a" "arm64-v8a")
+          # 【提速优化】尝试在脚本中安全剔除 x86 架构。
+          # 即使脚本格式未来有变导致替换失败，它也会静默 fallback 去编译全部 4 个架构，绝不报错中断。
+          sed -i 's/armeabi-v7a arm64-v8a x86 x86_64/armeabi-v7a arm64-v8a/g' build_ffmpeg.sh || true
           
-          for ARCH in "${ARCHS[@]}"
-          do
-            echo "正在为 $ARCH 架构编译 FFmpeg..."
-            ./build_ffmpeg.sh \
-              "${{ env.JNI_PATH }}/ffmpeg" \
-              "${{ steps.setup-ndk.outputs.ndk-path }}" \
-              "linux-x86_64" \
-              "$ARCH"
-          done
+          # 【核心！通过原生参数传递解码器】
+          # 我们把 mp2, mp2float 以及其他常见的音频解码器直接塞进数组里
+          ENABLED_DECODERS=(mp3 mp2 mp2float aac flac vorbis opus)
+          
+          echo "==== 开始执行 Media3 原生编译脚本 ===="
+          # 参数说明 (严格对应 1.3.1 官方要求):
+          # $1: 扩展模块的 src/main 路径
+          # $2: NDK 路径
+          # $3: 宿主系统 (linux-x86_64)
+          # $4: ANDROID_ABI (最低兼容版本，官方建议为 21)
+          # $5及以后: 你想要启用的所有解码器！
+          ./build_ffmpeg.sh \
+            "${{ env.FFMPEG_MODULE_PATH }}" \
+            "${{ steps.setup-ndk.outputs.ndk-path }}" \
+            "linux-x86_64" \
+            "21" \
+            "${ENABLED_DECODERS[@]}"
 
       - name: Build AAR with Gradle
         run: |
           cd $GITHUB_WORKSPACE/media
-          # 编译 FFmpeg 扩展模块
           ./gradlew lib-decoder-ffmpeg:assembleRelease
 
       - name: Upload Artifact
