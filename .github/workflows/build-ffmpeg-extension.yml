@@ -34,14 +34,10 @@ jobs:
 
       - name: Clone Media3 & FFmpeg
         run: |
-          # 克隆 Media3
           git clone --depth 1 --branch ${{ env.MEDIA3_VERSION }} https://github.com/androidx/media.git
-          
-          # 定义扩展模块路径
           FFMPEG_MODULE_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main
           echo "FFMPEG_MODULE_PATH=$FFMPEG_MODULE_PATH" >> $GITHUB_ENV
           
-          # 克隆 FFmpeg 源码
           cd $FFMPEG_MODULE_PATH/jni
           git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
 
@@ -49,14 +45,10 @@ jobs:
         run: |
           cd ${{ env.FFMPEG_MODULE_PATH }}/jni
           chmod +x build_ffmpeg.sh
-          
-          # 剔除 x86 和 x86_64 架构，缩短编译时间
           sed -i 's/armeabi-v7a arm64-v8a x86 x86_64/armeabi-v7a arm64-v8a/g' build_ffmpeg.sh || true
           
-          # 核心参数：在此处定义你需要的所有解码器（已包含 mp2 和 mp2float）
           ENABLED_DECODERS=(mp3 mp2 mp2float aac flac vorbis opus)
           
-          echo "==== 开始执行底层编译 ===="
           ./build_ffmpeg.sh \
             "${{ env.FFMPEG_MODULE_PATH }}" \
             "${{ steps.setup-ndk.outputs.ndk-path }}" \
@@ -67,18 +59,20 @@ jobs:
       - name: Build AAR with Gradle
         run: |
           cd $GITHUB_WORKSPACE/media
-          # 执行打包指令
-          ./gradlew lib-decoder-ffmpeg:assembleRelease
-          
-          echo "==== 正在寻找生成的 AAR 文件 ===="
-          # 在当前目录递归查找所有 .aar 结尾的文件并打印出来
-          find . -name "*.aar"
+          ./gradlew :lib-decoder-ffmpeg:assembleRelease
+
+      # 【核心新增】强行搜索并拷贝文件到根目录，避免路径深度问题
+      - name: Move AAR to Root for Easy Upload
+        run: |
+          echo "正在全盘搜索 .aar 文件..."
+          find . -name "*.aar" -exec cp {} $GITHUB_WORKSPACE/ \;
+          echo "搜索完成，根目录文件列表："
+          ls -l $GITHUB_WORKSPACE/*.aar
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: media3-ffmpeg-mp2-aar
-          # 使用强大的双星号通配符，无视目录层级深度抓取文件
-          path: "**/*decoder_ffmpeg*-release.aar"
-          # 如果还是找不到，直接报错而不是静默跳过
+          # 现在直接在根目录找，万无一失
+          path: "*.aar"
           if-no-files-found: error
