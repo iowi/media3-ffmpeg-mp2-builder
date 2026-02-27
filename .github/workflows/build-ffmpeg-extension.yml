@@ -61,7 +61,6 @@ jobs:
           cd $GITHUB_WORKSPACE/media
           ./gradlew :lib-decoder-ffmpeg:assembleRelease
 
-      # 【核心新增】强行搜索并拷贝文件到根目录，避免路径深度问题
       - name: Move AAR to Root for Easy Upload
         run: |
           echo "正在全盘搜索 .aar 文件..."
@@ -73,6 +72,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: media3-ffmpeg-mp2-aar
-          # 现在直接在根目录找，万无一失
           path: "*.aar"
           if-no-files-found: error
