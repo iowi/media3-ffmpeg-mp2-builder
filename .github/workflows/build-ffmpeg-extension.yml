@@ -1,26 +1,20 @@
-name: Build Media3 FFmpeg Extension with MP2 Support (ARM only)
+name: Media3 FFmpeg MP2 Builder
 
 on:
-  workflow_dispatch:
-    inputs:
-      media3_version:
-        description: 'Media3 Branch or Tag (e.g., main, 1.2.1)'
-        required: true
-        default: 'main'
-      ffmpeg_version:
-        description: 'FFmpeg Release Tag (e.g., n6.0)'
-        required: true
-        default: 'n6.0'
+  workflow_dispatch: # 支持手动点击运行
 
 jobs:
-  build:
+  build-extension:
     runs-on: ubuntu-latest
+    
+    # 设置环境变量方便引用
     env:
-      MEDIA3_PATH: ${{ github.workspace }}/media
-      FFMPEG_JNI_PATH: ${{ github.workspace }}/media/libraries/decoder_ffmpeg/src/main/jni
+      NDK_VERSION: r26b
+      MEDIA3_VERSION: 1.3.1  # 你可以修改为你需要的版本号或 main
+      FFMPEG_VERSION: release/6.0
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -29,79 +23,56 @@ jobs:
           java-version: '17'
           distribution: 'zulu'
 
-      - name: Setup Android NDK
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yasm nasm pkg-config
+
+      - name: Setup NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26b
-          local-cache: true
+          ndk-version: ${{ env.NDK_VERSION }}
 
-      - name: Prepare Source
+      - name: Clone Media3 & FFmpeg
         run: |
-          git clone --depth 1 --branch ${{ github.event.inputs.media3_version }} https://github.com/androidx/media.git "$MEDIA3_PATH"
-          cd "$FFMPEG_JNI_PATH"
-          git clone --depth 1 --branch ${{ github.event.inputs.ffmpeg_version }} https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          # 克隆 Media3
+          git clone --depth 1 --branch ${{ env.MEDIA3_VERSION }} https://github.com/androidx/media.git
+          
+          # 定义路径变量
+          JNI_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main/jni
+          echo "JNI_PATH=$JNI_PATH" >> $GITHUB_ENV
+          
+          # 克隆 FFmpeg 到指定目录
+          cd $JNI_PATH
+          git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
 
-      - name: Build FFmpeg Core
+      - name: Force Inject MP2 Support
         run: |
-          cd "$FFMPEG_JNI_PATH"
+          cd ${{ env.JNI_PATH }}
           
-          # 1. 注入 MP2 解码器支持到 Media3 的默认脚本中（防止 Gradle 构建时检查失败）
-          sed -i '/--enable-decoder=mp3/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
+          # 【核心修复】不使用匹配替换，直接在脚本最前面强行插入解码器配置
+          # 我们通过在 COMMON_OPTIONS 变量定义后追加参数来确保生效
+          sed -i '/COMMON_OPTIONS=(/a \    --enable-decoder=mp2 \\\n    --enable-decoder=mp2float \\' build_ffmpeg.sh
           
-          # 2. 创建高度兼容的 ARM 编译脚本
-          cat > build_ffmpeg_arm_only.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          FFMPEG_DIR=$1
-          NDK_PATH=$2
-          
-          # 定义工具链路径
-          TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-          
-          cd "$FFMPEG_DIR"
-          make distclean || true
-          
-          # 关键点：直接使用 clang 并显式指定 --target 绕过包装脚本错误
-          ./configure \
-            --target-os=android \
-            --arch=aarch64 \
-            --cpu=armv8-a \
-            --enable-cross-compile \
-            --cc=$TOOLCHAIN/bin/clang \
-            --extra-cflags="--target=aarch64-linux-android21 -Os -fPIC" \
-            --extra-ldflags="--target=aarch64-linux-android21" \
-            --sysroot=$TOOLCHAIN/sysroot \
-            --nm=llvm-nm \
-            --ar=llvm-ar \
-            --ranlib=llvm-ranlib \
-            --strip=llvm-strip \
-            --enable-static \
-            --disable-shared \
-            --disable-everything \
-            --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
-            --enable-decoder=h264,hevc,aac,mp3,mp2,mp2float \
-            --disable-doc --disable-programs || (cat ffbuild/config.log && exit 1)
-            
-          make -j$(nproc)
-          make install
-          EOF
-          
-          chmod +x build_ffmpeg_arm_only.sh
-          ./build_ffmpeg_arm_only.sh "$(pwd)/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "==== 检查脚本是否修改成功 ===="
+          grep -C 3 "mp2" build_ffmpeg.sh
 
-      - name: Assemble AAR via Gradle
+      - name: Build FFmpeg Native Libraries
         run: |
-          cd "$MEDIA3_PATH"
-          chmod +x gradlew
-          # 强制 Gradle 只生成 ARM 架构的 AAR，减少构建时间
-          ./gradlew :libraries:decoder_ffmpeg:assembleRelease \
-            -Pandroid.defaultConfig.abiFilters="armeabi-v7a,arm64-v8a" \
-            --stacktrace
+          cd ${{ env.JNI_PATH }}
+          chmod +x build_ffmpeg.sh
+          # 执行编译，针对所有主流架构
+          ./build_ffmpeg.sh "${{ env.JNI_PATH }}/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}" "linux-x86_64"
 
-      - name: Upload Final AAR
+      - name: Build AAR with Gradle
+        run: |
+          cd $GITHUB_WORKSPACE/media
+          # 这一步会将上一步生成的 .so 打包进 AAR
+          ./gradlew lib-decoder-ffmpeg:assembleRelease
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: media3-ffmpeg-extension-mp2-arm
-          path: ${{ env.MEDIA3_PATH }}/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          name: media3-ffmpeg-mp2-aar
+          path: media/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
