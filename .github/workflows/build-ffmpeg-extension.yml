@@ -34,13 +34,14 @@ jobs:
 
       - name: Clone Media3 & FFmpeg
         run: |
+          # 克隆 Media3
           git clone --depth 1 --branch ${{ env.MEDIA3_VERSION }} https://github.com/androidx/media.git
           
-          # 根据 1.3.1 官方规范，模块路径指向 src/main
+          # 定义扩展模块路径
           FFMPEG_MODULE_PATH=$GITHUB_WORKSPACE/media/libraries/decoder_ffmpeg/src/main
           echo "FFMPEG_MODULE_PATH=$FFMPEG_MODULE_PATH" >> $GITHUB_ENV
           
-          # 克隆 FFmpeg 源码到 jni 目录
+          # 克隆 FFmpeg 源码
           cd $FFMPEG_MODULE_PATH/jni
           git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
 
@@ -49,21 +50,13 @@ jobs:
           cd ${{ env.FFMPEG_MODULE_PATH }}/jni
           chmod +x build_ffmpeg.sh
           
-          # 【提速优化】尝试在脚本中安全剔除 x86 架构。
-          # 即使脚本格式未来有变导致替换失败，它也会静默 fallback 去编译全部 4 个架构，绝不报错中断。
+          # 剔除 x86 和 x86_64 架构，缩短编译时间
           sed -i 's/armeabi-v7a arm64-v8a x86 x86_64/armeabi-v7a arm64-v8a/g' build_ffmpeg.sh || true
           
-          # 【核心！通过原生参数传递解码器】
-          # 我们把 mp2, mp2float 以及其他常见的音频解码器直接塞进数组里
+          # 核心参数：在此处定义你需要的所有解码器（已包含 mp2 和 mp2float）
           ENABLED_DECODERS=(mp3 mp2 mp2float aac flac vorbis opus)
           
-          echo "==== 开始执行 Media3 原生编译脚本 ===="
-          # 参数说明 (严格对应 1.3.1 官方要求):
-          # $1: 扩展模块的 src/main 路径
-          # $2: NDK 路径
-          # $3: 宿主系统 (linux-x86_64)
-          # $4: ANDROID_ABI (最低兼容版本，官方建议为 21)
-          # $5及以后: 你想要启用的所有解码器！
+          echo "==== 开始执行底层编译 ===="
           ./build_ffmpeg.sh \
             "${{ env.FFMPEG_MODULE_PATH }}" \
             "${{ steps.setup-ndk.outputs.ndk-path }}" \
@@ -74,10 +67,18 @@ jobs:
       - name: Build AAR with Gradle
         run: |
           cd $GITHUB_WORKSPACE/media
+          # 执行打包指令
           ./gradlew lib-decoder-ffmpeg:assembleRelease
+          
+          echo "==== 正在寻找生成的 AAR 文件 ===="
+          # 在当前目录递归查找所有 .aar 结尾的文件并打印出来
+          find . -name "*.aar"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: media3-ffmpeg-mp2-aar
-          path: media/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          # 使用强大的双星号通配符，无视目录层级深度抓取文件
+          path: "**/*decoder_ffmpeg*-release.aar"
+          # 如果还是找不到，直接报错而不是静默跳过
+          if-no-files-found: error
