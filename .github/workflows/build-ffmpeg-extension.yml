@@ -1,4 +1,4 @@
-name: Media3 FFmpeg MP2 Builder
+name: Media3 FFmpeg MP2 Builder (v7a & v8a)
 
 on:
   workflow_dispatch:
@@ -8,8 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: r26b
-      # 明确指定版本，避免 main 分支变动
-      MEDIA3_VERSION: 1.3.1  
+      MEDIA3_VERSION: 1.3.1
       FFMPEG_VERSION: release/6.0
 
     steps:
@@ -22,7 +21,7 @@ jobs:
           java-version: '17'
           distribution: 'zulu'
 
-      - name: Install Dependencies
+      - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y yasm nasm pkg-config
@@ -42,35 +41,38 @@ jobs:
           cd $JNI_PATH
           git clone --depth 1 --branch ${{ env.FFMPEG_VERSION }} git://source.ffmpeg.org/ffmpeg ffmpeg
 
-      - name: Force Inject MP2 Support (The Nuclear Option)
+      - name: Inject MP2 Support
         run: |
           cd ${{ env.JNI_PATH }}
-          
-          # 检查文件
-          ls -l build_ffmpeg.sh
-          
-          # 直接在脚本的第二行（shebang 之后）插入强制开启 MP2 的参数
-          # 这样无论后面的 COMMON_OPTIONS 怎么变，这几个参数都会被加入到编译中
-          sed -i '2i ENABLED_DECODERS+=(mp2 mp2float)' build_ffmpeg.sh
-          
-          # 如果脚本里没有使用 ENABLED_DECODERS 变量，我们用最保险的方法：
-          # 直接搜索并替换 --enable-decoder=mp3 为支持 mp2 的版本
-          # 使用更加模糊的匹配模式
+          # 针对 1.3.1 脚本的精准注入：在配置数组中添加 mp2 和 mp2float
+          # 我们在 --enable-decoder=mp3 后面直接追加
           sed -i 's/--enable-decoder=mp3/--enable-decoder=mp3 --enable-decoder=mp2 --enable-decoder=mp2float/g' build_ffmpeg.sh
           
-          echo "==== 验证脚本内容 (显示前 50 行) ===="
-          head -n 50 build_ffmpeg.sh | grep "mp2" || echo "Warning: mp2 not found in head, checking full file..."
-          grep "mp2" build_ffmpeg.sh
+          echo "==== 检查脚本修改结果 ===="
+          grep "mp2" build_ffmpeg.sh || (echo "注入失败！" && exit 1)
 
-      - name: Build FFmpeg Native Libraries
+      - name: Build FFmpeg Native Libraries (arm64 & v7a)
         run: |
           cd ${{ env.JNI_PATH }}
           chmod +x build_ffmpeg.sh
-          ./build_ffmpeg.sh "${{ env.JNI_PATH }}/ffmpeg" "${{ steps.setup-ndk.outputs.ndk-path }}" "linux-x86_64"
+          
+          # 只编译你需要的两个架构
+          ARCHS=("armeabi-v7a" "arm64-v8a")
+          
+          for ARCH in "${ARCHS[@]}"
+          do
+            echo "正在为 $ARCH 架构编译 FFmpeg..."
+            ./build_ffmpeg.sh \
+              "${{ env.JNI_PATH }}/ffmpeg" \
+              "${{ steps.setup-ndk.outputs.ndk-path }}" \
+              "linux-x86_64" \
+              "$ARCH"
+          done
 
       - name: Build AAR with Gradle
         run: |
           cd $GITHUB_WORKSPACE/media
+          # 编译 FFmpeg 扩展模块
           ./gradlew lib-decoder-ffmpeg:assembleRelease
 
       - name: Upload Artifact
