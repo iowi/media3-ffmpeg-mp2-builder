@@ -1,4 +1,4 @@
-name: Media3 FFmpeg MP2 Builder (Ultimate)
+name: Media3 FFmpeg IPTV Pro (CAVS-AVS-HEVC)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,6 @@ jobs:
       NDK_VERSION: r26b
       MEDIA3_VERSION: 1.3.1
       FFMPEG_VERSION: release/6.0
-      # 强制 16 KB 页面对齐的链接器参数
       LDFLAGS: "-Wl,-z,max-page-size=16384"
 
     steps:
@@ -48,13 +47,20 @@ jobs:
           cd ${{ env.FFMPEG_MODULE_PATH }}/jni
           chmod +x build_ffmpeg.sh
           
-          # 精简架构：只编译 v7a 和 v8a
+          # 精简架构
           sed -i 's/armeabi-v7a arm64-v8a x86 x86_64/armeabi-v7a arm64-v8a/g' build_ffmpeg.sh || true
           
-          # 启用必要音频解码器
-          ENABLED_DECODERS=(mp3 mp2 mp2float aac flac vorbis opus)
+          # [核心配置] 加入 AVS 系列和 HEVC 支持
+          # 增加 avs2 以防部分新频道使用 AVS2 标准
+          ENABLED_DECODERS=(
+            mp3 mp2 mp2float ac3 eac3 aac flac vorbis opus 
+            hevc cavs avs2
+          )
           
-          echo "==== 开始执行底层编译（16KB 对齐） ===="
+          # [性能开关] 修改脚本以启用多线程解码 (关键！)
+          # 这会让软解高码率 CAVS/HEVC 时利用多核 CPU，减少卡顿
+          sed -i 's/--disable-pthreads/--enable-pthreads/g' build_ffmpeg.sh || true
+          
           ./build_ffmpeg.sh \
             "${{ env.FFMPEG_MODULE_PATH }}" \
             "${{ steps.setup-ndk.outputs.ndk-path }}" \
@@ -67,14 +73,13 @@ jobs:
           cd $GITHUB_WORKSPACE/media
           ./gradlew :lib-decoder-ffmpeg:assembleRelease
 
-      - name: Move AAR to Root for Easy Upload
+      - name: Move AAR to Root
         run: |
           find . -name "*.aar" -exec cp {} $GITHUB_WORKSPACE/ \;
-          ls -l $GITHUB_WORKSPACE/*.aar
+          ls -lh $GITHUB_WORKSPACE/*.aar
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: media3-ffmpeg-mp2-aar
+          name: media3-ffmpeg-iptv-ultimate
           path: "*.aar"
-          if-no-files-found: error
